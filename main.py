@@ -9,11 +9,10 @@ cached_url = None
 last_fetch_time = 0
 CACHE_DURATION = 300  # Renueva cada 5 minutos
 
-WEB_URL = "https://mi8.com.ar/en-vivo/"
+IFRAME_URL = "https://repro.arcast.cloud/canal8mdp/index.php"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Referer": "https://mi8.com.ar/",
-    "Accept-Language": "es-ES,es;q=0.9"
+    "Referer": "https://mi8.com.ar/"
 }
 
 def obtener_url_fresca():
@@ -24,41 +23,42 @@ def obtener_url_fresca():
         return cached_url
 
     try:
-        print("Iniciando busqueda de señal...")
-        session = requests.Session()
-        res = session.get(WEB_URL, headers=HEADERS, timeout=10)
-        print(f"Respuesta de mi8.com.ar: Status {res.status_code}")
+        print("Obteniendo señal desde el reproductor de Arcast...")
+        res = requests.get(IFRAME_URL, headers=HEADERS, timeout=10)
+        html = res.text
+        print(f"Respuesta de Arcast: Status {res.status_code}")
 
-        html_acumulado = res.text
-
-        # Buscar reproductor metido dentro de un iframe
-        iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', res.text, re.IGNORECASE)
-        print(f"Iframes detectados: {iframes}")
-
-        for iframe_url in iframes:
-            if any(k in iframe_url for k in ['stream', 'player', 'arcast', 'live', 'embed', 'vivo']):
-                try:
-                    if iframe_url.startswith('//'):
-                        iframe_url = 'https:' + iframe_url
-                    elif iframe_url.startswith('/'):
-                        iframe_url = 'https://mi8.com.ar' + iframe_url
-
-                    print(f"Analizando iframe: {iframe_url}")
-                    iframe_res = session.get(iframe_url, headers=HEADERS, timeout=8)
-                    html_acumulado += "\n" + iframe_res.text
-                except Exception as ie:
-                    print(f"Error en iframe {iframe_url}: {ie}")
-
-        # Buscar cualquier archivo .m3u8 en todo el HTML
-        match = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html_acumulado)
+        # 1. Buscar URL completa https://...m3u8
+        match = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
         if match:
             found_url = match.group(0).replace('\\/', '/').split('"')[0].split("'")[0]
             print(f"¡URL encontrada con exito!: {found_url}")
             cached_url = found_url
-            last_fetch_time = ahora
+            last_fetch_time = me_time = ahora
             return cached_url
 
-        print("No se encontro enlace .m3u8 en el sitio.")
+        # 2. Buscar URL relativa //...m3u8 o rutas internas
+        match_rel = re.search(r'//[^\s"\']+\.m3u8[^\s"\']*', html)
+        if match_rel:
+            found_url = "https:" + match_rel.group(0).replace('\\/', '/').split('"')[0].split("'")[0]
+            print(f"¡URL relativa encontrada!: {found_url}")
+            cached_url = found_url
+            last_fetch_time = me_time = ahora
+            return cached_url
+
+        # 3. Buscar cualquier coincidencia de archivo m3u8 o stream
+        match_src = re.search(r'(source|file|src)\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', html)
+        if match_src:
+            found_url = match_src.group(2).replace('\\/', '/')
+            if not found_url.startswith('http'):
+                found_url = 'https://repro.arcast.cloud/canal8mdp/' + found_url.lstrip('/')
+            print(f"¡URL capturada de variable JS!: {found_url}")
+            cached_url = found_url
+            last_fetch_time = me_time = ahora
+            return cached_url
+
+        print("Contenido recibido de Arcast (primeros 300 caracteres):")
+        print(html[:300])
 
     except Exception as e:
         print(f"Error en la peticion: {e}")
@@ -74,6 +74,10 @@ def proxy_stream():
     url = obtener_url_fresca()
     if url:
         return redirect(url, code=302)
+    return "Error al obtener la señal", 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
     return "Error al obtener la señal", 500
 
 if __name__ == '__main__':
