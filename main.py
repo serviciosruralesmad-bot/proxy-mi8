@@ -1,40 +1,25 @@
 import re
 import time
-import requests
+import cloudscraper
 from flask import Flask, redirect
 
 app = Flask(__name__)
 
 cached_url = None
 last_fetch_time = 0
-CACHE_DURATION = 300
+CACHE_DURATION = 300  # Guarda la URL por 5 minutos
 
+# Scraper especial para evadir la pantalla de Cloudflare
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
+
+TARGET_URL = "https://repro.arcast.cloud/canal8mdp/index.php"
 WEB_URL = "https://mi8.com.ar/en-vivo/"
-IFRAME_URL = "https://repro.arcast.cloud/canal8mdp/index.php"
-
-# Encabezados de navegador completo para superar Cloudflare
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Referer": "https://mi8.com.ar/",
-    "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "iframe",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "cross-site",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1"
-}
-
-# URLs directas conocidas de emisión de Arcast por si falla el scraping
-FALLBACK_URLS = [
-    "https://stream.arcast.cloud/canal8mdp/live/playlist.m3u8",
-    "https://repro.arcast.cloud/canal8mdp/live.m3u8",
-    "https://stream.arcast.cloud/canal8mdp/playlist.m3u8",
-    "https://live.arcast.cloud/canal8mdp/index.m3u8"
-]
 
 def obtener_url_fresca():
     global cached_url, last_fetch_time
@@ -43,43 +28,50 @@ def obtener_url_fresca():
     if cached_url and (ahora - last_fetch_time < CACHE_DURATION):
         return cached_url
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    # 1. Intentar navegación con sesión completa (Mi8 -> Arcast)
     try:
-        print("Paso 1: Estableciendo sesion en Mi8...")
-        session.get(WEB_URL, timeout=8)
+        print("--- EVADIENDO CLOUDFLARE CON CLOUDSCRAPER ---")
         
-        print("Paso 2: Obteniendo iframe de Arcast...")
-        res = session.get(IFRAME_URL, timeout=8)
-        print(f"Status Arcast: {res.status_code}")
+        # 1. Probar en la pagina directa de Arcast
+        res = scraper.get(TARGET_URL, timeout=12)
+        print(f"Status Arcast con scraper: {res.status_code}")
 
         if res.status_code == 200:
-            match = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', res.text)
+            html = res.text
+            match = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
             if match:
                 found_url = match.group(0).replace('\\/', '/').split('"')[0].split("'")[0]
-                print(f"¡URL encontrada via scraping!: {found_url}")
+                print(f"¡URL encontrada con exito!: {found_url}")
                 cached_url = found_url
                 last_fetch_time = ahora
                 return cached_url
-    except Exception as e:
-        print(f"Error en scraping: {e}")
 
-    # 2. Si Cloudflare da 403, probar transmisiones directas de Arcast
-    print("Paso 3: Probando servidores de emision directa...")
-    for candidate_url in FALLBACK_URLS:
-        try:
-            check = session.head(candidate_url, timeout=5, allow_redirects=True)
-            if check.status_code in [200, 302]:
-                print(f"¡Servidor directo activo encontrado!: {candidate_url}")
-                cached_url = candidate_url
+            match_rel = re.search(r'["\']([^"\']+\.m3u8[^"\']*)["\']', html)
+            if match_rel:
+                found_url = match_rel.group(1).replace('\\/', '/')
+                if found_url.startswith('//'):
+                    found_url = "https:" + found_url
+                elif not found_url.startswith('http'):
+                    found_url = "https://repro.arcast.cloud/canal8mdp/" + found_url.lstrip('/')
+                print(f"¡URL encontrada (relativa)!: {found_url}")
+                cached_url = found_url
                 last_fetch_time = ahora
                 return cached_url
-        except Exception:
-            continue
 
-    # Si todo falla pero teníamos una URL anterior, la devolvemos
+        # 2. Respaldar buscando en la web principal de Mi8
+        print("Buscando en mi8.com.ar con scraper...")
+        res_mi8 = scraper.get(WEB_URL, timeout=12)
+        if res_mi8.status_code == 200:
+            match_mi8 = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', res_mi8.text)
+            if match_mi8:
+                found_url = match_mi8.group(0).replace('\\/', '/').split('"')[0].split("'")[0]
+                print(f"¡URL encontrada en Mi8!: {found_url}")
+                cached_url = found_url
+                last_fetch_time = ahora
+                return cached_url
+
+    except Exception as e:
+        print(f"Error en el scraping: {e}")
+
     return cached_url
 
 @app.route('/')
